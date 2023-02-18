@@ -16,6 +16,7 @@ from transformers import (
 )
 
 from flash_attn.modules.mha import FlashSelfAttention
+import mod_patch
 
 class FlashAttentionWrapper(torch.nn.Module):
     def __init__(self, attention, max_seqlen = 8192):
@@ -92,26 +93,35 @@ class FlashAttentionWrapper(torch.nn.Module):
         return outputs
 
 def main():
+    debug_data = False
     parser = HfArgumentParser((TrainingArguments))
     #training_args = TrainingArguments(output_dir="pythia-6.7b", evaluation_strategy="epoch")
     training_args = parser.parse_args_into_dataclasses()[0]
     set_seed(training_args.seed)
-    model = GPTNeoXForCausalLM.from_pretrained("EleutherAI/pythia-1.3b")
-    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-1.3b")
+    # model = GPTNeoXForCausalLM.from_pretrained("EleutherAI/pythia-1.3b")
+    # tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-1.3b")
+    if not debug_data:
+        model = GPTNeoXForCausalLM.from_pretrained("EleutherAI/gpt-neox-20b")
+        model.forward = mod_patch.patch_forward.__get__(model,model.__class__)
+    print("model loaded")
+    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
     tokenizer.pad_token = tokenizer.mask_token
-    max_positions = 8192
+    # # #max_positions = 8192
+    max_positions = 2048
+    # #max_positions = 1
     tokenizer.model_max_length = max_positions
-    for each in model.gpt_neox.layers:
-        original_emb = each.attention.rotary_emb
-        each.attention.rotary_emb = RotaryEmbedding(each.attention.rotary_ndims,max_positions,10000)
-        each.attention.bias = torch.tril(torch.ones((max_positions, max_positions), dtype=torch.uint8)).view(
-                    1, 1, max_positions, max_positions
-                )
-        each.attention = FlashAttentionWrapper(each.attention, max_seqlen = max_positions)
+    if not debug_data:
+        for each in model.gpt_neox.layers:
+            original_emb = each.attention.rotary_emb
+            each.attention.rotary_emb = RotaryEmbedding(each.attention.rotary_ndims,max_positions,10000)
+            each.attention.bias = torch.tril(torch.ones((max_positions, max_positions), dtype=torch.uint8)).view(
+                        1, 1, max_positions, max_positions
+                    )
+            each.attention = FlashAttentionWrapper(each.attention, max_seqlen = max_positions)
 
-    def merge_questions_and_answers(examples):
-        out = tokenizer([question + " " + answer for question, answer in zip(examples["input"], examples["output"])])
-        return out
+    # def merge_questions_and_answers(examples):
+    #     out = tokenizer([question + " " + answer for question, answer in zip(examples["input"], examples["output"])])
+    #     return out
 
     block_size = tokenizer.model_max_length
     def group_texts(examples):
@@ -154,16 +164,34 @@ def main():
         "validation": base_url + "val.jsonl.zst",
         "test": base_url + "test.jsonl.zst",
     }
-    datasets = load_dataset("json", data_files=data_files, streaming=True)
-    datasets = datasets.filter(lambda x: len(x["text"])>=max_positions)
-    tokenized_datasets = datasets.map(
-        lambda examples: tokenizer(examples["text"]),
-        batched=True,
-    )
+    #data_files = {
+    #    "train": "dummy_json2.json"
+    #}
+    #datasets = load_dataset("json", data_files=data_files, streaming=True)
+    #datasets = load_dataset("wikitext","wikitext-103-raw-v1")
+    #datasets = load_dataset('json', data_files='dummy_json2.json', field="data")
+    #datasets = load_dataset('json', data_files='/import/ml-sc-scratch1/johnl/Long-context-transformers/samp_gpt20b_data.json', field="data")
+    #datasets = load_dataset('json', data_files='/import/ml-sc-scratch1/johnl/Long-context-transformers/samp_gpt20b_alldata.json', field="data")
+    datasets = load_dataset('json', data_files='/import/ml-sc-scratch1/johnl/Long-context-transformers/samp_gpt20b_alldata_input_ids.json', field="data")
+    #datasets = datasets.filter(lambda x: len(x["text"])>=max_positions)
+    # import IPython
+    # IPython.embed()
+    #import pdb; pdb.set_trace()
+    #print("length of dataset\n\n\n\n\n",len(datasets["train"]))
+    #assert len(datasets["text"])>100
+    
+    # tokenized_datasets = datasets.map(
+    #     lambda examples: tokenizer(examples["text"]),
+    #     batched=True,
+    # )
+    tokenized_datasets = datasets
+    #import pdb; pdb.set_trace()
     lm_datasets = tokenized_datasets.map(
         group_texts,
         batched=True,
     )
+    #import pdb; pdb.set_trace()
+    #lm_datasets = tokenized_datasets
     lm_datasets = lm_datasets.filter(lambda x: len(x["input_ids"])>=max_positions)
     def preprocess_logits_for_metrics(logits, labels):
         if isinstance(logits, tuple):
@@ -181,17 +209,23 @@ def main():
         return metric.compute(predictions=preds, references=labels)
 
     train_dataset = lm_datasets["train"]
-    eval_dataset = lm_datasets["validation"]
+    if debug_data:
+        import pdb; pdb.set_trace()
+    print("got train")
+    #eval_dataset = lm_datasets["validation"]
+    
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset= train_dataset,
-        eval_dataset= eval_dataset,
+        eval_dataset= None,
         tokenizer = tokenizer,
         data_collator=default_data_collator,
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics
     )
+
+    trainer.compute_loss = mod_patch.patch_compute_loss.__get__(trainer,trainer.__class__)
 
     train_result = trainer.train()
     trainer.save_model()  # Saves the tokenizer too for easy upload
@@ -205,6 +239,7 @@ def main():
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
     trainer.save_state()
+
 
 if __name__  == "__main__":
     main()
