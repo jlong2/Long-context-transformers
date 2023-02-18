@@ -20,3 +20,20 @@ Not much besides typical pytorch and transformers, the most likely issue will co
 
 ## To do:
 * enable multiple GPUs and model parallel
+
+## G-tuning:
+The input data file should be a json with a data field. Each training example should be a dictionary with the keys "input_ids" and "token_type_ids".
+Sample input data format:
+{
+    "data": [{"input_ids":[205, 696, 542...],"token_type_ids": [0,0,1,...]},
+             {"input_ids":[193, 926, 769...],"token_type_ids": [1,0,2,...]},
+             ...
+             ]
+}
+
+Run with the additional argument "--remove_unused_columns False" so that the token_type_ids is passed into the training loop.
+Ex: 
+```
+bash
+HF_MODULES_CACHE=./cache/ HF_DATASETS_CACHE=./cache/ TRANSFORMERS_CACHE=./cache/ deepspeed --num_gpus=8 finetune.py --per_device_train_batch_size 1 --per_device_eval_batch_size 1 --output_dir pythia-6.7b --gradient_accumulation_steps 8 --fp16 --evaluation_strategy "epoch" --max_steps 100000 --remove_unused_columns False --deepspeed ds_config.json
+```
